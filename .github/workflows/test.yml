@@ -1,0 +1,35 @@
+name: Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.26']
+    steps:
+    - name: Checkout armature-health
+      uses: actions/checkout@v4
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: ${{ matrix.go-version }}
+    - name: Install dependencies
+      run: go mod download
+    - name: Install gocyclo
+      run: go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
+    - name: Install golangci-lint
+      uses: golangci/golangci-lint-action@v9.2.0
+      with:
+        version: latest
+    - name: Run tests
+      run: make test
+    - name: Check code complexity
+      run: make gocyclo
+    - name: Run linter
+      run: make golangci

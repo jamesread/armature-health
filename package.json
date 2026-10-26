@@ -1,0 +1,8 @@
+{
+  "name": "armature-health",
+  "private": true,
+  "devDependencies": {
+    "semantic-release": "24.2.3",
+    "@semantic-release/github": "11.0.3"
+  }
+}
