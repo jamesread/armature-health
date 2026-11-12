@@ -18,7 +18,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	health "github.com/jamesread/armature-health"
+	health "github.com/jamesread/armature-health/v2"
 )
 
 const (

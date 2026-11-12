@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	health "github.com/jamesread/armature-health"
+	health "github.com/jamesread/armature-health/v2"
 )
 
 func keys(t *testing.T, check health.Check) []string {

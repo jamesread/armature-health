@@ -3,7 +3,8 @@ package sqlite
 
 import "embed"
 
-// FS contains health.sql (health_issues and health_check_runs).
+// FS contains the migrations, to apply in file-name order: health.sql (health_issues and
+// health_check_runs) and health_v2.sql (issue attributes, string user ids).
 //
-//go:embed health.sql
+//go:embed *.sql
 var FS embed.FS

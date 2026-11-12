@@ -9,13 +9,16 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/jamesread/armature-health/store"
+	"github.com/jamesread/armature-health/v2/store"
+	"github.com/jamesread/armature-health/v2/store/memstore"
 )
 
 // Options tunes a Service. Zero values use the defaults.
 type Options struct {
 	// Now returns the current time (default time.Now).
 	Now func() time.Time
+	// SourceTitles names the sources of pushed issues (see Service.Raise), by source ID.
+	SourceTitles map[string]string
 	// CheckTimeout bounds one check run (default 30s).
 	CheckTimeout time.Duration
 	// ResolvedRetention is how long resolved issues are kept (default 30 days).
@@ -51,12 +54,20 @@ type Service struct {
 	// runMu serialises runs so a manual "run now" and the background job never reconcile
 	// the same check at once.
 	runMu sync.Mutex
+	// pushMu serialises pushed issues (Raise, Resolve, SetIssues). It is separate from runMu
+	// so raising never waits for a slow check run; sources and checks never share an ID.
+	pushMu sync.Mutex
 	// notifications tracks in-flight notification sends (see Wait).
 	notifications sync.WaitGroup
 }
 
-// NewService creates a service for the given checks. notifier may be nil.
+// NewService creates a service for the given checks. st may be nil to keep issues in memory
+// (see store/memstore); pass a store/sqlstore store to keep them across restarts. notifier
+// may be nil.
 func NewService(st store.Store, checks []Check, notifier Notifier, opts Options) *Service {
+	if st == nil {
+		st = memstore.New()
+	}
 	return &Service{
 		store:    st,
 		checks:   checks,
@@ -70,10 +81,14 @@ func (s *Service) Checks() []Check {
 	return s.checks
 }
 
-// CheckTitle returns a check's title, or its ID when it is not registered (e.g. removed).
+// CheckTitle returns a check's title, a pushed-issue source's title from
+// Options.SourceTitles, or otherwise the ID itself (e.g. for a removed check).
 func (s *Service) CheckTitle(checkID string) string {
 	if check := s.find(checkID); check != nil {
 		return check.Title()
+	}
+	if title, ok := s.opts.SourceTitles[checkID]; ok {
+		return title
 	}
 	return checkID
 }
@@ -177,8 +192,8 @@ func (s *Service) Summary(ctx context.Context) (store.Summary, error) {
 
 // Acknowledge acknowledges (or un-acknowledges) an issue on behalf of a user. Acknowledged
 // issues leave the summary but still resolve normally. Returns store.ErrIssueNotFound for an
-// unknown id.
-func (s *Service) Acknowledge(ctx context.Context, id int64, acknowledged bool, userID int64) error {
+// unknown id. userID is the app's identifier for the user (e.g. a username or UUID).
+func (s *Service) Acknowledge(ctx context.Context, id int64, acknowledged bool, userID string) error {
 	return s.store.SetIssueAcknowledged(ctx, id, acknowledged, userID, s.opts.Now().Unix())
 }
 
@@ -193,7 +208,7 @@ func (s *Service) runCheck(ctx context.Context, check Check) {
 	}
 
 	if err == nil {
-		err = s.reconcile(ctx, check, issues)
+		err = s.reconcile(ctx, check.ID(), check.Title(), issues)
 	}
 	if err != nil {
 		run.Status = StatusFailed
@@ -218,22 +233,25 @@ func (s *Service) safeRun(ctx context.Context, check Check) (issues []Issue, err
 	return check.Run(ctx)
 }
 
-// reconcile stores new issues, refreshes ones seen again, and resolves ones no longer found.
-func (s *Service) reconcile(ctx context.Context, check Check, issues []Issue) error {
-	openByKey, err := s.openIssuesByKey(ctx, check.ID())
+// reconcile stores new issues, refreshes ones seen again, and resolves ones no longer found,
+// in one store call so readers never see a half-updated list.
+func (s *Service) reconcile(ctx context.Context, checkID, title string, issues []Issue) error {
+	openByKey, err := s.openIssuesByKey(ctx, checkID)
 	if err != nil {
 		return err
 	}
+	return s.apply(ctx, checkID, title, planChanges(checkID, uniqueByKey(checkID, issues), openByKey, s.opts.Now().Unix()))
+}
 
-	now := s.opts.Now().Unix()
-	seen := map[string]bool{}
-	for _, issue := range uniqueByKey(issues) {
-		seen[issue.Key] = true
-		if err := s.upsert(ctx, check, issue, openByKey, now); err != nil {
-			return err
-		}
+// apply saves changes in one store call, then notifies the inserted issues.
+func (s *Service) apply(ctx context.Context, checkID, title string, changes store.IssueChanges) error {
+	if err := s.store.ApplyIssueChanges(ctx, changes); err != nil {
+		return fmt.Errorf("save issues: %w", err)
 	}
-	return s.resolveMissing(ctx, openByKey, seen, now)
+	for _, inserted := range changes.Insert {
+		s.notify(checkID, title, inserted)
+	}
+	return nil
 }
 
 func (s *Service) openIssuesByKey(ctx context.Context, checkID string) (map[string]store.Issue, error) {
@@ -248,12 +266,18 @@ func (s *Service) openIssuesByKey(ctx context.Context, checkID string) (map[stri
 	return openByKey, nil
 }
 
-// uniqueByKey drops issues without a key and repeats of a key (the first one wins).
-func uniqueByKey(issues []Issue) []Issue {
+// uniqueByKey drops, with a warning, issues without a key and repeats of a key (the first
+// one wins).
+func uniqueByKey(checkID string, issues []Issue) []Issue {
 	seen := map[string]bool{}
 	out := make([]Issue, 0, len(issues))
 	for _, issue := range issues {
-		if issue.Key == "" || seen[issue.Key] {
+		if issue.Key == "" {
+			log.WithFields(log.Fields{"check": checkID, "title": issue.Title}).Warn("Health: dropped an issue with no Key; give every issue a stable Key")
+			continue
+		}
+		if seen[issue.Key] {
+			log.WithFields(log.Fields{"check": checkID, "key": issue.Key}).Warn("Health: dropped an issue with a repeated Key; the first one is kept")
 			continue
 		}
 		seen[issue.Key] = true
@@ -262,58 +286,57 @@ func uniqueByKey(issues []Issue) []Issue {
 	return out
 }
 
-// upsert refreshes the open issue with the same key, or inserts (and notifies) a new one.
-func (s *Service) upsert(ctx context.Context, check Check, issue Issue, openByKey map[string]store.Issue, now int64) error {
-	stored := store.Issue{
-		CheckID:     check.ID(),
+// planChanges updates the open issue with the same key, inserts the rest, and resolves open
+// issues that were not found.
+func planChanges(checkID string, issues []Issue, openByKey map[string]store.Issue, now int64) store.IssueChanges {
+	changes := store.IssueChanges{ResolvedAt: now}
+	seen := make(map[string]bool, len(issues))
+	for _, issue := range issues {
+		seen[issue.Key] = true
+		stored := toStored(checkID, issue, now)
+		if open, ok := openByKey[issue.Key]; ok {
+			stored.ID, stored.FirstSeen = open.ID, open.FirstSeen
+			changes.Update = append(changes.Update, stored)
+			continue
+		}
+		changes.Insert = append(changes.Insert, stored)
+	}
+	for key, open := range openByKey {
+		if !seen[key] {
+			changes.Resolve = append(changes.Resolve, open.ID)
+		}
+	}
+	return changes
+}
+
+func toStored(checkID string, issue Issue, now int64) store.Issue {
+	return store.Issue{
+		CheckID:     checkID,
 		IssueKey:    issue.Key,
 		Severity:    string(normalizeSeverity(issue.Severity)),
 		Title:       issue.Title,
 		Detail:      issue.Detail,
 		Link:        issue.Link,
+		Attributes:  store.CloneAttributes(issue.Attributes),
+		FirstSeen:   now,
 		LastSeen:    now,
 		Occurrences: max(issue.Count, 1),
 	}
-
-	if open, ok := openByKey[issue.Key]; ok {
-		stored.ID = open.ID
-		if err := s.store.UpdateSeenIssue(ctx, stored); err != nil {
-			return fmt.Errorf("update issue %s: %w", issue.Key, err)
-		}
-		return nil
-	}
-
-	stored.FirstSeen = now
-	if _, err := s.store.InsertIssue(ctx, stored); err != nil {
-		return fmt.Errorf("insert issue %s: %w", issue.Key, err)
-	}
-	s.notify(check, stored)
-	return nil
-}
-
-func (s *Service) resolveMissing(ctx context.Context, openByKey map[string]store.Issue, seen map[string]bool, now int64) error {
-	for key, open := range openByKey {
-		if seen[key] {
-			continue
-		}
-		if err := s.store.ResolveIssue(ctx, open.ID, now); err != nil {
-			return fmt.Errorf("resolve issue %s: %w", key, err)
-		}
-	}
-	return nil
 }
 
 // notify sends the issue-raised event for new warnings and errors, without blocking the run.
-func (s *Service) notify(check Check, issue store.Issue) {
+func (s *Service) notify(checkID, title string, issue store.Issue) {
 	if s.notifier == nil || issue.Severity == string(SeverityInfo) {
 		return
 	}
 	data := map[string]interface{}{
-		"check":    check.Title(),
-		"check_id": check.ID(),
-		"severity": issue.Severity,
-		"title":    issue.Title,
-		"link":     issue.Link,
+		"check":      title,
+		"check_id":   checkID,
+		"severity":   issue.Severity,
+		"title":      issue.Title,
+		"detail":     issue.Detail,
+		"link":       issue.Link,
+		"attributes": store.CloneAttributes(issue.Attributes),
 	}
 	s.notifications.Add(1)
 	go func() {
@@ -321,7 +344,7 @@ func (s *Service) notify(check Check, issue store.Issue) {
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.NotifyTimeout)
 		defer cancel()
 		if err := s.notifier.SendNotification(ctx, NotificationEventIssueRaised, data); err != nil {
-			log.WithError(err).WithField("check", check.ID()).Warn("Health: failed to send notification")
+			log.WithError(err).WithField("check", checkID).Warn("Health: failed to send notification")
 		}
 	}()
 }

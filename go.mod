@@ -1,4 +1,4 @@
-module github.com/jamesread/armature-health
+module github.com/jamesread/armature-health/v2
 
 go 1.26.0
 

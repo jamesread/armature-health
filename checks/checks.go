@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	health "github.com/jamesread/armature-health"
+	health "github.com/jamesread/armature-health/v2"
 )
 
 // DefaultPassword reports when a built-in account still has its default password

@@ -2,15 +2,15 @@
 // so admins can see and fix problems (broken configuration, risky settings, recent errors)
 // before users run into them.
 //
-// Apps implement Check for their own problems, pass the checks to NewService with a
-// store.Store (see store/sqlstore and the schema in migrate/), and run
-// Service.RunPeriodically in the background.
+// Apps implement Check for their own problems, pass the checks to NewService, and run
+// Service.RunPeriodically in the background. Issues are kept in memory by default; pass a
+// store/sqlstore store (with the schema in migrate/) to keep them in a database.
 package health
 
 import (
 	"context"
 
-	"github.com/jamesread/armature-health/store"
+	"github.com/jamesread/armature-health/v2/store"
 )
 
 // Severity of an issue. Only warnings and errors are notified and counted in the badge.
@@ -24,6 +24,9 @@ const (
 
 // Issue is one problem found by a check.
 type Issue struct {
+	// Attributes are app-defined details kept with the issue, e.g. {"action_id": "restart"}
+	// so the app can filter issues by permission or show extra columns. Optional.
+	Attributes map[string]string
 	// Key identifies the issue within its check across runs (e.g. "nav:42"). An issue with
 	// the same key on the next run is the same issue; a missing key means it was resolved.
 	Key      string
@@ -56,7 +59,8 @@ type Notifier interface {
 }
 
 // NotificationEventIssueRaised is sent once when a warning or error issue first appears. Its
-// data has the keys "check" (title), "check_id", "severity", "title" and "link".
+// data has the keys "check" (the check or source title), "check_id", "severity", "title",
+// "detail", "link" and "attributes" (the issue's map[string]string, nil when it has none).
 const NotificationEventIssueRaised = "health.issue_raised"
 
 // Check run statuses.
