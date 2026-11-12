@@ -198,8 +198,19 @@ func TestAcknowledgedIssuesLeaveTheSummary(t *testing.T) {
 			if unacked, _ := svc.ListIssues(ctx, false, false); len(unacked) != 1 {
 				t.Fatalf("expected the acknowledged issue to be hidden, got %+v", unacked)
 			}
-			if err := svc.Acknowledge(ctx, 9999, true, "alice"); !errors.Is(err, store.ErrIssueNotFound) {
-				t.Fatalf("expected ErrIssueNotFound, got %v", err)
+			// Un-acknowledging twice is not an error (MySQL reports no changed rows the second time).
+			for range 2 {
+				if err := svc.Acknowledge(ctx, errorID, false, "alice"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := svc.Acknowledge(ctx, errorID, true, "alice"); err != nil {
+				t.Fatal(err)
+			}
+			for _, acknowledged := range []bool{true, false} {
+				if err := svc.Acknowledge(ctx, 9999, acknowledged, "alice"); !errors.Is(err, store.ErrIssueNotFound) {
+					t.Fatalf("expected ErrIssueNotFound, got %v", err)
+				}
 			}
 
 			// Acknowledged issues still resolve normally.

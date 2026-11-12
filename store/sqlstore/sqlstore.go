@@ -125,7 +125,20 @@ func (s *SQL) SetIssueAcknowledged(ctx context.Context, id int64, acknowledged b
 	if err != nil {
 		return err
 	}
+	// MySQL counts changed rows, not matched ones, so 0 can also mean "already in that state".
 	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return s.requireIssue(ctx, id)
+	}
+	return nil
+}
+
+// requireIssue returns ErrIssueNotFound when no issue has the id.
+func (s *SQL) requireIssue(ctx context.Context, id int64) error {
+	var count int
+	if err := s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM health_issues WHERE id = ?", id).Scan(&count); err != nil {
+		return err
+	}
+	if count == 0 {
 		return fmt.Errorf("%w: %d", store.ErrIssueNotFound, id)
 	}
 	return nil
