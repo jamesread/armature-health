@@ -106,7 +106,9 @@ With the SQL store, add `health_v2.sql` to your migrations after the `health.sql
 
 ## Notifications
 
-Pass a `health.Notifier` (anything with `SendNotification(ctx, eventCode, data)`) to `NewService`, or nil. A new warning or error sends `health.issue_raised` once, with data keys `check`, `check_id`, `severity`, `title`, `detail`, `link` and `attributes` (the issue's `map[string]string`, nil when it has none).
+Pass a `health.Notifier` (anything with `SendNotification(ctx, eventCode, data)`) to `NewService`, or nil. A new warning or error sends `health.issue_raised` once, with data keys `check`, `check_id`, `severity`, `previous_severity`, `title`, `detail`, `link` and `attributes` (the issue's `map[string]string`, nil when it has none).
+
+If an open issue is found again with a higher severity (info → warning → error), it is notified again with `previous_severity` set to the old severity (empty for a new issue). If it was acknowledged, the acknowledgement is cleared so it shows in the summary again. A lower severity changes neither.
 
 ## Storage
 

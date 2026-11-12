@@ -54,6 +54,9 @@ type IssueChanges struct {
 	// Update holds open issues found again, by ID. Their severity, title, detail, link,
 	// attributes, last-seen time and occurrences are replaced.
 	Update []Issue
+	// Unacknowledge holds the IDs of issues whose acknowledgement is cleared (because their
+	// severity increased).
+	Unacknowledge []int64
 	// Resolve holds the IDs of open issues no longer found.
 	Resolve []int64
 	// ResolvedAt is the time recorded on resolved issues.

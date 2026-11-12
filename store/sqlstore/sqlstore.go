@@ -55,6 +55,9 @@ func applyChanges(ctx context.Context, tx *sql.Tx, changes store.IssueChanges) e
 	if err := updateIssues(ctx, tx, changes.Update); err != nil {
 		return err
 	}
+	if err := unacknowledgeIssues(ctx, tx, changes.Unacknowledge); err != nil {
+		return err
+	}
 	return resolveIssues(ctx, tx, changes.Resolve, changes.ResolvedAt)
 }
 
@@ -86,6 +89,15 @@ func updateIssues(ctx context.Context, tx *sql.Tx, issues []store.Issue) error {
 			WHERE id = ?`,
 			issue.Severity, issue.Title, issue.Detail, issue.Link, attributes, issue.LastSeen, issue.Occurrences, issue.ID); err != nil {
 			return fmt.Errorf("update issue %s: %w", issue.IssueKey, err)
+		}
+	}
+	return nil
+}
+
+func unacknowledgeIssues(ctx context.Context, tx *sql.Tx, ids []int64) error {
+	for _, id := range ids {
+		if _, err := tx.ExecContext(ctx, "UPDATE health_issues SET acknowledged_at = NULL, acknowledged_by = NULL WHERE id = ?", id); err != nil {
+			return fmt.Errorf("unacknowledge issue %d: %w", id, err)
 		}
 	}
 	return nil

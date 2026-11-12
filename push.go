@@ -22,7 +22,8 @@ var ErrMissingKey = errors.New("health issue has no key")
 // Raise records one occurrence of a pushed issue. A new issue is stored and notified like a
 // check's; raising an open issue's key again adds to its occurrences (issue.Count, or 1),
 // moves its last-seen time to now and replaces its severity, title, detail, link and
-// attributes. It stays open until Resolve or SetIssues resolves it.
+// attributes; if the severity increased, it is un-acknowledged and notified again. It stays
+// open until Resolve or SetIssues resolves it.
 func (s *Service) Raise(ctx context.Context, sourceID string, issue Issue) error {
 	if err := s.validateSource(sourceID); err != nil {
 		return err
@@ -56,7 +57,7 @@ func (s *Service) Resolve(ctx context.Context, sourceID, key string) error {
 	if !ok {
 		return nil
 	}
-	return s.apply(ctx, sourceID, "", store.IssueChanges{Resolve: []int64{open.ID}, ResolvedAt: s.opts.Now().Unix()})
+	return s.apply(ctx, sourceID, "", plan{changes: store.IssueChanges{Resolve: []int64{open.ID}, ResolvedAt: s.opts.Now().Unix()}})
 }
 
 // SetIssues replaces a source's open issues with issues, as a check run would: new keys are
@@ -83,13 +84,15 @@ func (s *Service) validateSource(sourceID string) error {
 }
 
 // planRaise inserts the issue, or adds this occurrence to the open issue with its key.
-func planRaise(sourceID string, issue Issue, openByKey map[string]store.Issue, now int64) store.IssueChanges {
+func planRaise(sourceID string, issue Issue, openByKey map[string]store.Issue, now int64) plan {
+	var p plan
 	stored := toStored(sourceID, issue, now)
 	open, ok := openByKey[issue.Key]
 	if !ok {
-		return store.IssueChanges{Insert: []store.Issue{stored}}
+		p.insert(stored)
+		return p
 	}
-	stored.ID, stored.FirstSeen = open.ID, open.FirstSeen
 	stored.Occurrences += open.Occurrences
-	return store.IssueChanges{Update: []store.Issue{stored}}
+	p.update(open, stored)
+	return p
 }

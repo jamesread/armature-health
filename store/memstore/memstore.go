@@ -46,6 +46,9 @@ func (m *Memory) ApplyIssueChanges(_ context.Context, changes store.IssueChanges
 	for _, issue := range changes.Update {
 		m.updateLocked(issue)
 	}
+	for _, id := range changes.Unacknowledge {
+		m.unacknowledgeLocked(id)
+	}
 	for _, id := range changes.Resolve {
 		m.resolveLocked(id, changes.ResolvedAt)
 	}
@@ -69,6 +72,15 @@ func (m *Memory) updateLocked(issue store.Issue) {
 	stored.Attributes = attrs.Clone(issue.Attributes)
 	stored.LastSeen, stored.Occurrences = issue.LastSeen, issue.Occurrences
 	m.issues[issue.ID] = stored
+}
+
+func (m *Memory) unacknowledgeLocked(id int64) {
+	stored, ok := m.issues[id]
+	if !ok {
+		return
+	}
+	stored.AcknowledgedAt, stored.AcknowledgedBy = nil, nil
+	m.issues[id] = stored
 }
 
 func (m *Memory) resolveLocked(id int64, at int64) {

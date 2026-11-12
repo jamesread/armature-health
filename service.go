@@ -192,7 +192,8 @@ func (s *Service) Summary(ctx context.Context) (store.Summary, error) {
 }
 
 // Acknowledge acknowledges (or un-acknowledges) an issue on behalf of a user. Acknowledged
-// issues leave the summary but still resolve normally. Returns store.ErrIssueNotFound for an
+// issues leave the summary but still resolve normally; if a later run finds the issue with a
+// higher severity, it is un-acknowledged and notified again. Returns store.ErrIssueNotFound for an
 // unknown id. userID is the app's identifier for the user (e.g. a username or UUID).
 func (s *Service) Acknowledge(ctx context.Context, id int64, acknowledged bool, userID string) error {
 	return s.store.SetIssueAcknowledged(ctx, id, acknowledged, userID, s.opts.Now().Unix())
@@ -244,13 +245,45 @@ func (s *Service) reconcile(ctx context.Context, checkID, title string, issues [
 	return s.apply(ctx, checkID, title, planChanges(checkID, uniqueByKey(checkID, issues), openByKey, s.opts.Now().Unix()))
 }
 
-// apply saves changes in one store call, then notifies the inserted issues.
-func (s *Service) apply(ctx context.Context, checkID, title string, changes store.IssueChanges) error {
-	if err := s.store.ApplyIssueChanges(ctx, changes); err != nil {
+// plan is one batch of store changes and the notifications to send once they are saved.
+type plan struct {
+	notify  []notification
+	changes store.IssueChanges
+}
+
+// notification is an issue to notify; previousSeverity is set when it escalated.
+type notification struct {
+	previousSeverity string
+	issue            store.Issue
+}
+
+// insert stores a new issue and notifies it.
+func (p *plan) insert(stored store.Issue) {
+	p.changes.Insert = append(p.changes.Insert, stored)
+	p.notify = append(p.notify, notification{issue: stored})
+}
+
+// update refreshes an open issue found again. If its severity increased, it is
+// un-acknowledged and notified again.
+func (p *plan) update(open, stored store.Issue) {
+	stored.ID, stored.FirstSeen = open.ID, open.FirstSeen
+	p.changes.Update = append(p.changes.Update, stored)
+	if severityRank(stored.Severity) <= severityRank(open.Severity) {
+		return
+	}
+	if open.AcknowledgedAt != nil {
+		p.changes.Unacknowledge = append(p.changes.Unacknowledge, open.ID)
+	}
+	p.notify = append(p.notify, notification{issue: stored, previousSeverity: open.Severity})
+}
+
+// apply saves a plan's changes in one store call, then sends its notifications.
+func (s *Service) apply(ctx context.Context, checkID, title string, p plan) error {
+	if err := s.store.ApplyIssueChanges(ctx, p.changes); err != nil {
 		return fmt.Errorf("save issues: %w", err)
 	}
-	for _, inserted := range changes.Insert {
-		s.notify(checkID, title, inserted)
+	for _, n := range p.notify {
+		s.notify(checkID, title, n)
 	}
 	return nil
 }
@@ -289,25 +322,24 @@ func uniqueByKey(checkID string, issues []Issue) []Issue {
 
 // planChanges updates the open issue with the same key, inserts the rest, and resolves open
 // issues that were not found.
-func planChanges(checkID string, issues []Issue, openByKey map[string]store.Issue, now int64) store.IssueChanges {
-	changes := store.IssueChanges{ResolvedAt: now}
+func planChanges(checkID string, issues []Issue, openByKey map[string]store.Issue, now int64) plan {
+	p := plan{changes: store.IssueChanges{ResolvedAt: now}}
 	seen := make(map[string]bool, len(issues))
 	for _, issue := range issues {
 		seen[issue.Key] = true
 		stored := toStored(checkID, issue, now)
 		if open, ok := openByKey[issue.Key]; ok {
-			stored.ID, stored.FirstSeen = open.ID, open.FirstSeen
-			changes.Update = append(changes.Update, stored)
+			p.update(open, stored)
 			continue
 		}
-		changes.Insert = append(changes.Insert, stored)
+		p.insert(stored)
 	}
 	for key, open := range openByKey {
 		if !seen[key] {
-			changes.Resolve = append(changes.Resolve, open.ID)
+			p.changes.Resolve = append(p.changes.Resolve, open.ID)
 		}
 	}
-	return changes
+	return p
 }
 
 func toStored(checkID string, issue Issue, now int64) store.Issue {
@@ -325,19 +357,22 @@ func toStored(checkID string, issue Issue, now int64) store.Issue {
 	}
 }
 
-// notify sends the issue-raised event for new warnings and errors, without blocking the run.
-func (s *Service) notify(checkID, title string, issue store.Issue) {
+// notify sends the issue-raised event for new or escalated warnings and errors, without
+// blocking the run.
+func (s *Service) notify(checkID, title string, n notification) {
+	issue := n.issue
 	if s.notifier == nil || issue.Severity == string(SeverityInfo) {
 		return
 	}
 	data := map[string]interface{}{
-		"check":      title,
-		"check_id":   checkID,
-		"severity":   issue.Severity,
-		"title":      issue.Title,
-		"detail":     issue.Detail,
-		"link":       issue.Link,
-		"attributes": attrs.Clone(issue.Attributes),
+		"check":             title,
+		"check_id":          checkID,
+		"severity":          issue.Severity,
+		"previous_severity": n.previousSeverity,
+		"title":             issue.Title,
+		"detail":            issue.Detail,
+		"link":              issue.Link,
+		"attributes":        attrs.Clone(issue.Attributes),
 	}
 	s.notifications.Add(1)
 	go func() {
@@ -348,6 +383,18 @@ func (s *Service) notify(checkID, title string, issue store.Issue) {
 			log.WithError(err).WithField("check", checkID).Warn("Health: failed to send notification")
 		}
 	}()
+}
+
+// severityRank orders severities: info < warning < error.
+func severityRank(severity string) int {
+	switch Severity(severity) {
+	case SeverityError:
+		return 2
+	case SeverityWarning:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func normalizeSeverity(severity Severity) Severity {

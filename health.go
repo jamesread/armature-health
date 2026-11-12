@@ -58,9 +58,11 @@ type Notifier interface {
 	SendNotification(ctx context.Context, eventCode string, data map[string]interface{}) error
 }
 
-// NotificationEventIssueRaised is sent once when a warning or error issue first appears. Its
-// data has the keys "check" (the check or source title), "check_id", "severity", "title",
-// "detail", "link" and "attributes" (the issue's map[string]string, nil when it has none).
+// NotificationEventIssueRaised is sent when a warning or error issue first appears, and again
+// if its severity later increases (e.g. warning to error). Its data has the keys "check" (the
+// check or source title), "check_id", "severity", "previous_severity" (empty for a new issue,
+// the old severity for an escalation), "title", "detail", "link" and "attributes" (the
+// issue's map[string]string, nil when it has none).
 const NotificationEventIssueRaised = "health.issue_raised"
 
 // Check run statuses.

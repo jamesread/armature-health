@@ -32,6 +32,7 @@ func (c *fakeCheck) Run(context.Context) ([]health.Issue, error) {
 type recordingNotifier struct {
 	titles     []string
 	details    []string
+	previous   []string
 	attributes []map[string]string
 	mu         sync.Mutex
 }
@@ -42,6 +43,7 @@ func (n *recordingNotifier) SendNotification(_ context.Context, eventCode string
 	if eventCode == health.NotificationEventIssueRaised {
 		n.titles = append(n.titles, data["title"].(string))
 		n.details = append(n.details, data["detail"].(string))
+		n.previous = append(n.previous, data["previous_severity"].(string))
 		n.attributes = append(n.attributes, data["attributes"].(map[string]string))
 	}
 	return nil
@@ -263,6 +265,77 @@ func TestAttributesAreKeptAndRefreshed(t *testing.T) {
 			if got := byKey()["a"].Attributes; len(got) != 1 || got["action_id"] != "stop" {
 				t.Fatalf("attributes not refreshed: %v", got)
 			}
+		})
+	}
+}
+
+// escalationSteps drives one issue through severity changes and checks the outcome after each.
+// set changes the issue's severity and runs (or raises) it.
+func escalationSteps(t *testing.T, svc *health.Service, notifier *recordingNotifier, set func(health.Severity)) {
+	t.Helper()
+	ctx := context.Background()
+	issue := func() health.IssueView {
+		t.Helper()
+		issues, err := svc.ListIssues(ctx, false, true)
+		if err != nil || len(issues) != 1 {
+			t.Fatalf("expected one open issue, got %+v (%v)", issues, err)
+		}
+		return issues[0]
+	}
+	step := func(severity health.Severity, wantAcked bool, wantNotifications int, wantPrevious string) {
+		t.Helper()
+		set(severity)
+		svc.Wait()
+		notifier.mu.Lock()
+		defer notifier.mu.Unlock()
+		if acked := issue().AcknowledgedAt != nil; acked != wantAcked {
+			t.Fatalf("%s: acknowledged %v, want %v", severity, acked, wantAcked)
+		}
+		if len(notifier.previous) != wantNotifications {
+			t.Fatalf("%s: %d notifications, want %d", severity, len(notifier.previous), wantNotifications)
+		}
+		if wantNotifications > 0 && notifier.previous[wantNotifications-1] != wantPrevious {
+			t.Fatalf("%s: previous_severity %q, want %q", severity, notifier.previous[wantNotifications-1], wantPrevious)
+		}
+	}
+	ack := func() {
+		t.Helper()
+		if err := svc.Acknowledge(ctx, issue().ID, true, "alice"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	step(health.SeverityInfo, false, 0, "")        // info is never notified
+	step(health.SeverityWarning, false, 1, "info") // info -> warning notifies
+	ack()
+	step(health.SeverityError, false, 2, "warning") // escalation clears the acknowledgement
+	ack()
+	step(health.SeverityWarning, true, 2, "warning") // de-escalation changes nothing
+	step(health.SeverityWarning, true, 2, "warning") // nor does the same severity
+}
+
+func TestEscalationFromChecks(t *testing.T) {
+	for name, newStore := range stores {
+		t.Run(name, func(t *testing.T) {
+			check := &fakeCheck{}
+			svc, _, notifier, _ := newTestService(t, newStore, check)
+			escalationSteps(t, svc, notifier, func(severity health.Severity) {
+				check.issues = []health.Issue{{Key: "a", Severity: severity, Title: "A"}}
+				svc.RunAll(context.Background())
+			})
+		})
+	}
+}
+
+func TestEscalationFromRaise(t *testing.T) {
+	for name, newStore := range stores {
+		t.Run(name, func(t *testing.T) {
+			svc, _, notifier, _ := newPushService(t, newStore)
+			escalationSteps(t, svc, notifier, func(severity health.Severity) {
+				if err := svc.Raise(context.Background(), "src", health.Issue{Key: "a", Severity: severity, Title: "A"}); err != nil {
+					t.Fatal(err)
+				}
+			})
 		})
 	}
 }
