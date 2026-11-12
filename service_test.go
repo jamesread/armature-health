@@ -52,13 +52,19 @@ func (n *recordingNotifier) SendNotification(_ context.Context, eventCode string
 type newStoreFunc func(t *testing.T) store.Store
 
 // stores lists every store.Store implementation; each service test runs against all of them.
-var stores = map[string]newStoreFunc{
-	"memstore": func(*testing.T) store.Store { return memstore.New() },
-	"sqlstore": func(t *testing.T) store.Store {
-		t.Helper()
-		return sqlstore.New(testdb.NewMigratedSQLite(t), "sqlite")
-	},
-}
+// The MySQL one skips unless testdb.MySQLDSNEnv is set.
+var stores = func() map[string]newStoreFunc {
+	out := map[string]newStoreFunc{
+		"memstore": func(*testing.T) store.Store { return memstore.New() },
+	}
+	for name, dialect := range testdb.Dialects {
+		out["sqlstore-"+name] = func(t *testing.T) store.Store {
+			t.Helper()
+			return sqlstore.New(dialect.NewMigrated(t), dialect.Driver)
+		}
+	}
+	return out
+}()
 
 func TestNilStoreDefaultsToMemory(t *testing.T) {
 	check := &fakeCheck{issues: []health.Issue{{Key: "a", Severity: health.SeverityWarning, Title: "A"}}}
