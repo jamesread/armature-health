@@ -22,11 +22,11 @@ jobs:
     - name: Install dependencies
       run: go mod download
     - name: Install gocyclo
-      run: go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
+      run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
     - name: Install golangci-lint
       uses: golangci/golangci-lint-action@v9.2.0
       with:
-        version: latest
+        version: v2.12.2
     - name: Run tests
       run: make test
     - name: Check code complexity
