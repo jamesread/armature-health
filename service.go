@@ -47,10 +47,12 @@ func orDefault(d, def time.Duration) time.Duration {
 
 // Service runs checks and reconciles their issues with the stored ones.
 type Service struct {
-	store    store.Store
-	notifier Notifier
-	checks   []Check
-	opts     Options
+	// lastPrune is when issues were last pruned (guarded by pruneMu).
+	lastPrune time.Time
+	store     store.Store
+	notifier  Notifier
+	checks    []Check
+	opts      Options
 
 	// runMu serialises runs so a manual "run now" and the background job never reconcile
 	// the same check at once.
@@ -60,7 +62,13 @@ type Service struct {
 	pushMu sync.Mutex
 	// notifications tracks in-flight notification sends (see Wait).
 	notifications sync.WaitGroup
+	// pruneMu guards lastPrune.
+	pruneMu sync.Mutex
 }
+
+// pruneInterval is how often saving issues outside RunAll (e.g. Raise) prunes long-resolved
+// issues, so apps that only push issues do not keep them forever. RunAll prunes every run.
+const pruneInterval = time.Hour
 
 // NewService creates a service for the given checks. st may be nil to keep issues in memory
 // (see store/memstore); pass a store/sqlstore store to keep them across restarts. notifier
@@ -111,6 +119,30 @@ func (s *Service) RunAll(ctx context.Context) {
 	for _, check := range s.checks {
 		s.runCheck(ctx, check)
 	}
+	s.claimPrune(0)
+	s.prune(ctx)
+}
+
+// maybePrune prunes long-resolved issues if pruneInterval has passed since the last prune.
+func (s *Service) maybePrune(ctx context.Context) {
+	if s.claimPrune(pruneInterval) {
+		s.prune(ctx)
+	}
+}
+
+// claimPrune records a prune starting now, unless one started less than minInterval ago.
+func (s *Service) claimPrune(minInterval time.Duration) bool {
+	s.pruneMu.Lock()
+	defer s.pruneMu.Unlock()
+	now := s.opts.Now()
+	if !s.lastPrune.IsZero() && now.Sub(s.lastPrune) < minInterval {
+		return false
+	}
+	s.lastPrune = now
+	return true
+}
+
+func (s *Service) prune(ctx context.Context) {
 	if err := s.store.PruneResolvedIssues(ctx, s.opts.Now().Add(-s.opts.ResolvedRetention).Unix()); err != nil {
 		log.WithError(err).Warn("Health: failed to prune resolved issues")
 	}
@@ -277,7 +309,8 @@ func (p *plan) update(open, stored store.Issue) {
 	p.notify = append(p.notify, notification{issue: stored, previousSeverity: open.Severity})
 }
 
-// apply saves a plan's changes in one store call, then sends its notifications.
+// apply saves a plan's changes in one store call, then sends its notifications and, at most
+// once per pruneInterval, prunes long-resolved issues.
 func (s *Service) apply(ctx context.Context, checkID, title string, p plan) error {
 	if err := s.store.ApplyIssueChanges(ctx, p.changes); err != nil {
 		return fmt.Errorf("save issues: %w", err)
@@ -285,6 +318,7 @@ func (s *Service) apply(ctx context.Context, checkID, title string, p plan) erro
 	for _, n := range p.notify {
 		s.notify(checkID, title, n)
 	}
+	s.maybePrune(ctx)
 	return nil
 }
 

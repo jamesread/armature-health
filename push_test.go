@@ -25,6 +25,63 @@ func newPushService(t *testing.T, newStore newStoreFunc) (*health.Service, store
 	return svc, st, notifier, &now
 }
 
+// countingStore counts prunes.
+type countingStore struct {
+	store.Store
+	prunes int
+}
+
+func (c *countingStore) PruneResolvedIssues(ctx context.Context, before int64) error {
+	c.prunes++
+	return c.Store.PruneResolvedIssues(ctx, before)
+}
+
+func TestPushOnlyAppsPruneResolvedIssues(t *testing.T) {
+	for name, newStore := range stores {
+		t.Run(name, func(t *testing.T) {
+			st := &countingStore{Store: newStore(t)}
+			now := time.Unix(1_800_000_000, 0)
+			svc := health.NewService(st, nil, nil, health.Options{Now: func() time.Time { return now }})
+			ctx := context.Background()
+			raise := func(key string) {
+				t.Helper()
+				if err := svc.Raise(ctx, "src", health.Issue{Key: key, Title: key}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			raise("old") // first save prunes
+			if err := svc.Resolve(ctx, "src", "old"); err != nil {
+				t.Fatal(err)
+			}
+			now = now.Add(59 * time.Minute)
+			raise("old-again")
+			if st.prunes != 1 {
+				t.Fatalf("expected one prune within the hour, got %d", st.prunes)
+			}
+
+			// Past the retention period (30 days by default) and the prune interval.
+			now = now.Add(31 * 24 * time.Hour)
+			raise("new")
+			if st.prunes != 2 {
+				t.Fatalf("expected a second prune, got %d", st.prunes)
+			}
+			all, err := svc.ListIssues(ctx, true, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, issue := range all {
+				if issue.IssueKey == "old" {
+					t.Fatalf("long-resolved issue was not pruned: %+v", all)
+				}
+			}
+			if len(all) != 2 {
+				t.Fatalf("expected old-again and new to remain, got %+v", all)
+			}
+		})
+	}
+}
+
 func TestRaiseCountsRepeats(t *testing.T) {
 	for name, newStore := range stores {
 		t.Run(name, func(t *testing.T) {
