@@ -81,16 +81,3 @@ type Store interface {
 	// ListCheckRuns returns the latest run of every check that has run.
 	ListCheckRuns(ctx context.Context) ([]CheckRun, error)
 }
-
-// CloneAttributes copies attributes, returning nil when there are none. Stores use it so
-// callers never share a map with stored state.
-func CloneAttributes(attributes map[string]string) map[string]string {
-	if len(attributes) == 0 {
-		return nil
-	}
-	out := make(map[string]string, len(attributes))
-	for k, v := range attributes {
-		out[k] = v
-	}
-	return out
-}

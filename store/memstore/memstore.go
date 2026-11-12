@@ -9,6 +9,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/jamesread/armature-health/v2/internal/attrs"
 	"github.com/jamesread/armature-health/v2/store"
 )
 
@@ -55,7 +56,7 @@ func (m *Memory) insertLocked(issue store.Issue) {
 	m.nextID++
 	issue.ID = m.nextID
 	issue.ResolvedAt, issue.AcknowledgedAt, issue.AcknowledgedBy = nil, nil, nil
-	issue.Attributes = store.CloneAttributes(issue.Attributes)
+	issue.Attributes = attrs.Clone(issue.Attributes)
 	m.issues[issue.ID] = issue
 }
 
@@ -65,7 +66,7 @@ func (m *Memory) updateLocked(issue store.Issue) {
 		return
 	}
 	stored.Severity, stored.Title, stored.Detail, stored.Link = issue.Severity, issue.Title, issue.Detail, issue.Link
-	stored.Attributes = store.CloneAttributes(issue.Attributes)
+	stored.Attributes = attrs.Clone(issue.Attributes)
 	stored.LastSeen, stored.Occurrences = issue.LastSeen, issue.Occurrences
 	m.issues[issue.ID] = stored
 }
@@ -168,7 +169,7 @@ func clone(issue store.Issue) store.Issue {
 	issue.ResolvedAt = clonePtr(issue.ResolvedAt)
 	issue.AcknowledgedAt = clonePtr(issue.AcknowledgedAt)
 	issue.AcknowledgedBy = clonePtr(issue.AcknowledgedBy)
-	issue.Attributes = store.CloneAttributes(issue.Attributes)
+	issue.Attributes = attrs.Clone(issue.Attributes)
 	return issue
 }
 

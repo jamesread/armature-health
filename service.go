@@ -9,6 +9,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
+	"github.com/jamesread/armature-health/v2/internal/attrs"
 	"github.com/jamesread/armature-health/v2/store"
 	"github.com/jamesread/armature-health/v2/store/memstore"
 )
@@ -317,7 +318,7 @@ func toStored(checkID string, issue Issue, now int64) store.Issue {
 		Title:       issue.Title,
 		Detail:      issue.Detail,
 		Link:        issue.Link,
-		Attributes:  store.CloneAttributes(issue.Attributes),
+		Attributes:  attrs.Clone(issue.Attributes),
 		FirstSeen:   now,
 		LastSeen:    now,
 		Occurrences: max(issue.Count, 1),
@@ -336,7 +337,7 @@ func (s *Service) notify(checkID, title string, issue store.Issue) {
 		"title":      issue.Title,
 		"detail":     issue.Detail,
 		"link":       issue.Link,
-		"attributes": store.CloneAttributes(issue.Attributes),
+		"attributes": attrs.Clone(issue.Attributes),
 	}
 	s.notifications.Add(1)
 	go func() {

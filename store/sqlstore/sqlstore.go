@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jamesread/armature-health/v2/internal/attrs"
 	"github.com/jamesread/armature-health/v2/store"
 )
 
@@ -271,5 +272,5 @@ func decodeAttributes(s string) (map[string]string, error) {
 	if err := json.Unmarshal([]byte(s), &attributes); err != nil {
 		return nil, fmt.Errorf("decode attributes: %w", err)
 	}
-	return store.CloneAttributes(attributes), nil
+	return attrs.Clone(attributes), nil
 }
