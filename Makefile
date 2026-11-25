@@ -40,6 +40,7 @@ gocyclo:
 	@echo "All library functions have complexity <= 5"
 
 golangci:
+	golangci-lint config verify
 	golangci-lint run
 
 clean:
