@@ -25,6 +25,9 @@ const (
 	recentErrorWindow = 24 * time.Hour
 	maxLoggedErrors   = 500
 	maxTitleMessage   = 160
+	// maxMessage bounds each remembered message, so one huge log line cannot use much memory
+	// or produce an issue detail too large to store.
+	maxMessage = 2000
 )
 
 // ErrorLog is a logrus hook that remembers recent error-level log entries, grouped by a
@@ -65,6 +68,7 @@ func (l *ErrorLog) Fire(entry *log.Entry) error {
 }
 
 func (l *ErrorLog) record(message string) {
+	message = truncate(message, maxMessage)
 	fingerprint := fingerprintMessage(message)
 	now := l.now()
 
