@@ -66,3 +66,34 @@ func TestV2MigrationKeepsV1Data(t *testing.T) {
 		})
 	}
 }
+
+// TestMySQLIDsAreCaseSensitive checks that after health_v3.sql, check IDs and issue keys
+// that differ only in case or trailing spaces are distinct.
+func TestMySQLIDsAreCaseSensitive(t *testing.T) {
+	dialect := testdb.Dialects["mysql"]
+	db := dialect.NewMigrated(t)
+	st := sqlstore.New(db, dialect.Driver)
+	ctx := context.Background()
+	if err := st.ApplyIssueChanges(ctx, store.IssueChanges{Insert: []store.Issue{
+		{CheckID: "Foo", IssueKey: "k", Severity: "info"},
+		{CheckID: "foo", IssueKey: "k", Severity: "info"},
+		{CheckID: "foo ", IssueKey: "k", Severity: "info"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	issues, err := st.ListOpenIssuesForCheck(ctx, "foo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(issues) != 1 || issues[0].CheckID != "foo" {
+		t.Fatalf("expected only the exact check ID, got %+v", issues)
+	}
+	for _, id := range []string{"Foo", "foo"} {
+		if err := st.SaveCheckRun(ctx, store.CheckRun{CheckID: id, Status: "ok"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if runs, _ := st.ListCheckRuns(ctx); len(runs) != 2 {
+		t.Fatalf("expected two check runs, got %+v", runs)
+	}
+}

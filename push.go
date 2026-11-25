@@ -53,7 +53,7 @@ func (s *Service) Resolve(ctx context.Context, sourceID, key string) error {
 	if err != nil {
 		return err
 	}
-	open, ok := openByKey[key]
+	open, ok := openByKey[boundKey(key)]
 	if !ok {
 		return nil
 	}
@@ -74,8 +74,8 @@ func (s *Service) SetIssues(ctx context.Context, sourceID string, issues []Issue
 }
 
 func (s *Service) validateSource(sourceID string) error {
-	if sourceID == "" {
-		return errors.New("health issue source ID is empty")
+	if !validID(sourceID) {
+		return fmt.Errorf("health issue source ID %q is empty, longer than %d bytes or not valid UTF-8", sourceID, MaxIDBytes)
 	}
 	if s.find(sourceID) != nil {
 		return fmt.Errorf("%q is a registered health check; push issues under a different source ID", sourceID)
@@ -87,7 +87,7 @@ func (s *Service) validateSource(sourceID string) error {
 func planRaise(sourceID string, issue Issue, openByKey map[string]store.Issue, now int64) plan {
 	var p plan
 	stored := toStored(sourceID, issue, now)
-	open, ok := openByKey[issue.Key]
+	open, ok := openByKey[stored.IssueKey]
 	if !ok {
 		p.insert(stored)
 		return p
