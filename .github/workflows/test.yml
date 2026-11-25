@@ -1,5 +1,8 @@
 name: Tests
 
+permissions:
+  contents: read
+
 on:
   push:
     branches: [ main ]
@@ -14,9 +17,9 @@ jobs:
         go-version: ['1.26']
     steps:
     - name: Checkout armature-health
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
       with:
         go-version: ${{ matrix.go-version }}
     - name: Install dependencies
@@ -24,7 +27,7 @@ jobs:
     - name: Install gocyclo
       run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
     - name: Install golangci-lint
-      uses: golangci/golangci-lint-action@v9.2.0
+      uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
       with:
         version: v2.12.2
     - name: Run tests
@@ -56,9 +59,9 @@ jobs:
           --health-retries 30
     steps:
     - name: Checkout armature-health
-      uses: actions/checkout@v4
+      uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
     - name: Set up Go
-      uses: actions/setup-go@v5
+      uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
       with:
         go-version: '1.26'
     - name: Run tests against ${{ matrix.image }}
