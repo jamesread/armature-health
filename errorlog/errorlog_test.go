@@ -55,7 +55,7 @@ func TestErrorLogEvictsTheOldest(t *testing.T) {
 	l := New()
 	now := time.Unix(1_800_000_000, 0)
 	l.now = func() time.Time { return now }
-	for i := 0; i < maxLoggedErrors; i++ {
+	for i := range maxLoggedErrors {
 		now = now.Add(time.Second)
 		l.record(string(rune('a'+i%26)) + string(rune('a'+i/26%26)) + string(rune('a'+i/676)))
 	}

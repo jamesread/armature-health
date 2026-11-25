@@ -398,7 +398,7 @@ func (s *Service) notify(checkID, title string, n notification) {
 	if s.notifier == nil || issue.Severity == string(SeverityInfo) {
 		return
 	}
-	data := map[string]interface{}{
+	data := map[string]any{
 		"check":             title,
 		"check_id":          checkID,
 		"severity":          issue.Severity,
@@ -408,15 +408,13 @@ func (s *Service) notify(checkID, title string, n notification) {
 		"link":              issue.Link,
 		"attributes":        attrs.Clone(issue.Attributes),
 	}
-	s.notifications.Add(1)
-	go func() {
-		defer s.notifications.Done()
+	s.notifications.Go(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), s.opts.NotifyTimeout)
 		defer cancel()
 		if err := s.notifier.SendNotification(ctx, NotificationEventIssueRaised, data); err != nil {
 			log.WithError(err).WithField("check", checkID).Warn("Health: failed to send notification")
 		}
-	}()
+	})
 }
 
 // severityRank orders severities: info < warning < error.

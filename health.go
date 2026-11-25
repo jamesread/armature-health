@@ -55,7 +55,7 @@ type Check interface {
 
 // Notifier sends a notification event.
 type Notifier interface {
-	SendNotification(ctx context.Context, eventCode string, data map[string]interface{}) error
+	SendNotification(ctx context.Context, eventCode string, data map[string]any) error
 }
 
 // NotificationEventIssueRaised is sent when a warning or error issue first appears, and again

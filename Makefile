@@ -1,4 +1,4 @@
-.PHONY: build test test-mysql gocyclo golangci clean
+.PHONY: build test test-mysql gocyclo golangci lint clean
 
 build:
 	@echo "Building armature-health..."
@@ -7,6 +7,8 @@ build:
 test:
 	@echo "Running unit tests..."
 	@go test -v ./...
+
+lint: gocyclo golangci
 
 # test-mysql also runs the SQL store tests against MySQL/MariaDB, in a throwaway container
 # (podman or docker). Override MYSQL_IMAGE, e.g. docker.io/library/mysql:8.4.

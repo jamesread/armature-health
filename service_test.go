@@ -37,7 +37,7 @@ type recordingNotifier struct {
 	mu         sync.Mutex
 }
 
-func (n *recordingNotifier) SendNotification(_ context.Context, eventCode string, data map[string]interface{}) error {
+func (n *recordingNotifier) SendNotification(_ context.Context, eventCode string, data map[string]any) error {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 	if eventCode == health.NotificationEventIssueRaised {
