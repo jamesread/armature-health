@@ -69,6 +69,13 @@ func (c MyBrokenLinksCheck) Run(ctx context.Context) ([]health.Issue, error) {
 - **Link** is the frontend path where the problem can be fixed.
 - **Attributes** (optional `map[string]string`) are your own details, stored with the issue and returned on `IssueView`. Use them to filter issues by permission (e.g. `action_id`) or to fill extra UI columns. They are replaced each time the check finds the issue again.
 - Returning an error (or panicking) records the run as failed and keeps the check's previous issues.
+- **Timeouts**: `Run` gets a context that ends after `Options.CheckTimeout` (default 30s). A check that does not return by then is recorded as failed and abandoned, so the other checks still run; it is not started again until its `Run` returns.
+- **IDs** must be unique, non-empty and at most 191 bytes (`health.MaxIDBytes`). Checks with a repeated or invalid ID are dropped with a warning, because two checks sharing an ID would resolve each other's issues.
+- **Size limits** keep one oversized value from failing a run: keys over 191 bytes become a prefix plus a hash of the whole key (stable across runs), titles and details are cut (512 and 16,000 characters), links over 512 characters are dropped, and attributes are bounded (see the `Max*` constants). Invalid UTF-8 is replaced with U+FFFD.
+
+### Removing or renaming a check
+
+Open issues of a check that is no longer registered are never resolved by a run, so with the SQL store they stay in the summary after an upgrade. Clear them once, e.g. at startup, with `svc.SetIssues(ctx, "old.check_id", nil)`, which resolves every open issue of that ID.
 
 ## Pushed issues
 
@@ -110,16 +117,26 @@ Pass a `health.Notifier` (anything with `SendNotification(ctx, eventCode, data)`
 
 If an open issue is found again with a higher severity (info → warning → error), it is notified again with `previous_severity` set to the old severity (empty for a new issue). If it was acknowledged, the acknowledgement is cleared so it shows in the summary again. A lower severity changes neither.
 
+At most `Options.MaxNotifications` (default 10) are sent per check run or push; the rest are stored as usual and the number skipped is logged, so a burst of new issues does not flood the notifier.
+
+### What errorlog stores and sends
+
+`errorlog` keeps the text of error-level log lines (cut to 2,000 characters) and puts it in each issue's title and detail. That text is stored with the issue and, for new issues, sent to your notifier, which may forward it to chat or email. Anything your app logs at error level, including user input or secrets in error messages, can end up there. Avoid logging secrets, or leave `errorlog.RecentErrorsCheck` out if the notifier's destination should not see log contents.
+
 ## Storage
 
 Issues and check runs are kept in memory when you pass a nil store (or `memstore.New()`). That needs no database, but restarts lose issue history, first-seen times and acknowledgements, and an issue that is still present is notified again after a restart.
 
-To keep them across restarts, use the SQL store: copy the scripts in `migrate/sqlite/` or `migrate/mysql/` (`health.sql`, then `health_v2.sql`) into your app's migrations, then pass `sqlstore.New(db, driver)`. It uses MySQL syntax when `driver` is `"mysql"` and SQLite otherwise.
+To keep them across restarts, use the SQL store: copy the scripts in `migrate/sqlite/` or `migrate/mysql/` (`health.sql`, then `health_v2.sql`, then for MySQL `health_v3.sql`) into your app's migrations, then pass `sqlstore.New(db, driver)`. It uses MySQL syntax when `driver` is `"mysql"` and SQLite otherwise.
 
 ```go
 import "github.com/jamesread/armature-health/v2/store/sqlstore"
 
 svc := health.NewService(sqlstore.New(db, "sqlite"), checks, notifier, health.Options{})
 ```
+
+On MySQL/MariaDB, `health_v3.sql` converts the tables to utf8mb4 (whatever the server's default character set) and makes check IDs and issue keys compare byte for byte; without it, IDs that differ only in case or trailing spaces are treated as the same. SQLite needs no third script.
+
+Run checks and push issues from one instance per database. The service keeps at most one open issue per check and key by serialising its own runs, not with a database constraint, so several replicas sharing a database would store duplicate issues and send duplicate notifications. Other replicas can still read (`ListIssues`, `Summary`, `Acknowledge`).
 
 You can implement `store.Store` for any other backend. `ApplyIssueChanges` must apply each check run's inserts, updates and resolutions atomically, so a request made during a run sees either the old issues or the new ones, never a mix.

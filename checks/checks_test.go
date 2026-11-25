@@ -56,3 +56,14 @@ func TestRiskySettings(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+func TestNilFuncsDoNotPanic(t *testing.T) {
+	if _, err := (DefaultPassword{}).Run(context.Background()); err == nil {
+		t.Fatal("expected an error when UsesDefaultPassword is not set")
+	}
+	t.Setenv("ARMATURE_HEALTH_TEST_RISKY", "1")
+	check := RiskySettings{EnvVars: []RiskyEnvVar{{Name: "ARMATURE_HEALTH_TEST_RISKY"}}}
+	if got := keys(t, check); len(got) != 1 {
+		t.Fatalf("expected os.Getenv by default, got %v", got)
+	}
+}

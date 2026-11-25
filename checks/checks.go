@@ -3,7 +3,9 @@ package checks
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	health "github.com/jamesread/armature-health/v2"
@@ -25,7 +27,13 @@ type DefaultPassword struct {
 func (c DefaultPassword) ID() string    { return "security.default_admin_password" }
 func (c DefaultPassword) Title() string { return "Default admin password" }
 
+// errNoPasswordFunc fails DefaultPassword when UsesDefaultPassword is not set.
+var errNoPasswordFunc = errors.New("DefaultPassword.UsesDefaultPassword is not set")
+
 func (c DefaultPassword) Run(ctx context.Context) ([]health.Issue, error) {
+	if c.UsesDefaultPassword == nil {
+		return nil, errNoPasswordFunc
+	}
 	usesDefault, err := c.UsesDefaultPassword(ctx)
 	if err != nil || !usesDefault {
 		return nil, err
@@ -55,7 +63,7 @@ type RiskyEnvVar struct {
 // RiskySettings reports configuration that should not be left on in normal running
 // (ID "config.risky_settings"): any of EnvVars that are set, and a debug or trace log level.
 type RiskySettings struct {
-	// Getenv reads environment variables (os.Getenv in production).
+	// Getenv reads environment variables (default os.Getenv).
 	Getenv func(string) string
 	// LogLevel is the configured log level.
 	LogLevel string
@@ -69,9 +77,10 @@ func (c RiskySettings) ID() string    { return "config.risky_settings" }
 func (c RiskySettings) Title() string { return "Risky configuration settings" }
 
 func (c RiskySettings) Run(ctx context.Context) ([]health.Issue, error) {
+	getenv := c.getenv()
 	var issues []health.Issue
 	for _, v := range c.EnvVars {
-		if c.Getenv(v.Name) != "" {
+		if getenv(v.Name) != "" {
 			issues = append(issues, envVarIssue(v))
 		}
 	}
@@ -84,6 +93,13 @@ func (c RiskySettings) Run(ctx context.Context) ([]health.Issue, error) {
 		})
 	}
 	return issues, nil
+}
+
+func (c RiskySettings) getenv() func(string) string {
+	if c.Getenv == nil {
+		return os.Getenv
+	}
+	return c.Getenv
 }
 
 func envVarIssue(v RiskyEnvVar) health.Issue {

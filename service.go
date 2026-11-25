@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -26,6 +27,10 @@ type Options struct {
 	ResolvedRetention time.Duration
 	// NotifyTimeout bounds one notification send (default 30s).
 	NotifyTimeout time.Duration
+	// MaxNotifications bounds the notifications sent for one check run or push (default 10),
+	// so a burst of new issues (e.g. many distinct logged errors) does not flood the
+	// notifier. The rest are still stored, and the number skipped is logged.
+	MaxNotifications int
 }
 
 func (o Options) withDefaults() Options {
@@ -34,6 +39,9 @@ func (o Options) withDefaults() Options {
 	o.NotifyTimeout = orDefault(o.NotifyTimeout, 30*time.Second)
 	if o.Now == nil {
 		o.Now = time.Now
+	}
+	if o.MaxNotifications <= 0 {
+		o.MaxNotifications = 10
 	}
 	return o
 }
@@ -51,8 +59,11 @@ type Service struct {
 	lastPrune time.Time
 	store     store.Store
 	notifier  Notifier
-	checks    []Check
-	opts      Options
+	// running holds the IDs of checks whose Run has not returned, including ones abandoned
+	// at CheckTimeout (guarded by runningMu).
+	running map[string]bool
+	checks  []Check
+	opts    Options
 
 	// runMu serialises runs so a manual "run now" and the background job never reconcile
 	// the same check at once.
@@ -64,7 +75,12 @@ type Service struct {
 	notifications sync.WaitGroup
 	// pruneMu guards lastPrune.
 	pruneMu sync.Mutex
+	// runningMu guards running.
+	runningMu sync.Mutex
 }
+
+// defaultInterval is used by RunPeriodically when given an interval that is not positive.
+const defaultInterval = 15 * time.Minute
 
 // pruneInterval is how often saving issues outside RunAll (e.g. Raise) prunes long-resolved
 // issues, so apps that only push issues do not keep them forever. RunAll prunes every run.
@@ -73,16 +89,47 @@ const pruneInterval = time.Hour
 // NewService creates a service for the given checks. st may be nil to keep issues in memory
 // (see store/memstore); pass a store/sqlstore store to keep them across restarts. notifier
 // may be nil.
+//
+// Checks with an empty, too long (see MaxIDBytes) or repeated ID are dropped with a warning:
+// two checks sharing an ID would resolve each other's issues on every run.
 func NewService(st store.Store, checks []Check, notifier Notifier, opts Options) *Service {
 	if st == nil {
 		st = memstore.New()
 	}
 	return &Service{
 		store:    st,
-		checks:   checks,
+		checks:   validChecks(checks),
 		notifier: notifier,
 		opts:     opts.withDefaults(),
+		running:  map[string]bool{},
 	}
+}
+
+// validChecks drops, with a warning, nil checks, checks whose ID cannot be stored, and
+// repeats of an ID (the first one wins).
+func validChecks(checks []Check) []Check {
+	seen := map[string]bool{}
+	out := make([]Check, 0, len(checks))
+	for _, check := range checks {
+		if !usableCheck(check, seen) {
+			continue
+		}
+		seen[check.ID()] = true
+		out = append(out, check)
+	}
+	return out
+}
+
+func usableCheck(check Check, seen map[string]bool) bool {
+	if check == nil {
+		log.Warn("Health: dropped a nil check")
+		return false
+	}
+	if id := check.ID(); !validID(id) || seen[id] {
+		log.WithField("check", id).Warn("Health: dropped a check with an empty, too long, invalid or repeated ID")
+		return false
+	}
+	return true
 }
 
 // Checks returns the registered checks in order.
@@ -160,9 +207,12 @@ func (s *Service) Run(ctx context.Context, checkID string) error {
 	return nil
 }
 
-// RunPeriodically runs all checks after initialDelay and then every interval, until ctx is
-// done. It blocks.
+// RunPeriodically runs all checks after initialDelay and then every interval (15 minutes if
+// interval is not positive), until ctx is done. It blocks.
 func (s *Service) RunPeriodically(ctx context.Context, initialDelay, interval time.Duration) {
+	if interval <= 0 {
+		interval = defaultInterval
+	}
 	log.WithField("interval", interval).Info("Health check job started")
 	timer := time.NewTimer(initialDelay)
 	defer timer.Stop()
@@ -246,7 +296,7 @@ func (s *Service) runCheck(ctx context.Context, check Check) {
 	}
 	if err != nil {
 		run.Status = StatusFailed
-		run.Error = err.Error()
+		run.Error = boundText(err.Error(), maxRunErrorRunes)
 		log.WithError(err).WithField("check", check.ID()).Warn("Health check failed")
 	}
 	if saveErr := s.store.SaveCheckRun(ctx, run); saveErr != nil {
@@ -254,10 +304,55 @@ func (s *Service) runCheck(ctx context.Context, check Check) {
 	}
 }
 
-// safeRun runs a check with a timeout and turns panics into errors.
-func (s *Service) safeRun(ctx context.Context, check Check) (issues []Issue, err error) {
+// errStillRunning fails a run while the check's previous Run has not returned.
+var errStillRunning = errors.New("the previous run of this check has not returned yet")
+
+type checkResult struct {
+	err    error
+	issues []Issue
+}
+
+// safeRun runs a check with a timeout and turns panics into errors. A check that does not
+// return by the timeout (e.g. one that ignores its context) is abandoned, so it cannot hold
+// up the other checks, and is not started again until its Run returns.
+func (s *Service) safeRun(ctx context.Context, check Check) ([]Issue, error) {
+	if !s.startRunning(check.ID()) {
+		return nil, errStillRunning
+	}
 	ctx, cancel := context.WithTimeout(ctx, s.opts.CheckTimeout)
 	defer cancel()
+	done := make(chan checkResult, 1)
+	go func() {
+		defer s.stopRunning(check.ID())
+		issues, err := recoveredRun(ctx, check)
+		done <- checkResult{issues: issues, err: err}
+	}()
+	select {
+	case r := <-done:
+		return r.issues, r.err
+	case <-ctx.Done():
+		return nil, fmt.Errorf("check did not return within %s: %w", s.opts.CheckTimeout, ctx.Err())
+	}
+}
+
+func (s *Service) startRunning(checkID string) bool {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	if s.running[checkID] {
+		return false
+	}
+	s.running[checkID] = true
+	return true
+}
+
+func (s *Service) stopRunning(checkID string) {
+	s.runningMu.Lock()
+	defer s.runningMu.Unlock()
+	delete(s.running, checkID)
+}
+
+// recoveredRun runs a check, turning a panic into an error.
+func recoveredRun(ctx context.Context, check Check) (issues []Issue, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("check panicked: %v", r)
@@ -289,23 +384,24 @@ type notification struct {
 	issue            store.Issue
 }
 
-// insert stores a new issue and notifies it.
+// insert stores a new issue and, for a warning or error, notifies it.
 func (p *plan) insert(stored store.Issue) {
 	p.changes.Insert = append(p.changes.Insert, stored)
-	p.notify = append(p.notify, notification{issue: stored})
+	if stored.Severity != string(SeverityInfo) {
+		p.notify = append(p.notify, notification{issue: stored})
+	}
 }
 
 // update refreshes an open issue found again. If its severity increased, it is
-// un-acknowledged and notified again.
+// un-acknowledged and notified again. The acknowledgement is cleared whether or not the
+// issue was acknowledged when it was loaded, so one made meanwhile does not survive.
 func (p *plan) update(open, stored store.Issue) {
 	stored.ID, stored.FirstSeen = open.ID, open.FirstSeen
 	p.changes.Update = append(p.changes.Update, stored)
 	if severityRank(stored.Severity) <= severityRank(open.Severity) {
 		return
 	}
-	if open.AcknowledgedAt != nil {
-		p.changes.Unacknowledge = append(p.changes.Unacknowledge, open.ID)
-	}
+	p.changes.Unacknowledge = append(p.changes.Unacknowledge, open.ID)
 	p.notify = append(p.notify, notification{issue: stored, previousSeverity: open.Severity})
 }
 
@@ -315,11 +411,23 @@ func (s *Service) apply(ctx context.Context, checkID, title string, p plan) erro
 	if err := s.store.ApplyIssueChanges(ctx, p.changes); err != nil {
 		return fmt.Errorf("save issues: %w", err)
 	}
-	for _, n := range p.notify {
-		s.notify(checkID, title, n)
-	}
+	s.notifyAll(checkID, title, p.notify)
 	s.maybePrune(ctx)
 	return nil
+}
+
+// notifyAll sends up to Options.MaxNotifications notifications and logs how many it skipped.
+func (s *Service) notifyAll(checkID, title string, notifications []notification) {
+	if s.notifier == nil {
+		return
+	}
+	limit := min(len(notifications), s.opts.MaxNotifications)
+	for _, n := range notifications[:limit] {
+		s.notify(checkID, title, n)
+	}
+	if skipped := len(notifications) - limit; skipped > 0 {
+		log.WithFields(log.Fields{"check": checkID, "skipped": skipped}).Warn("Health: too many new issues at once; skipped their notifications")
+	}
 }
 
 func (s *Service) openIssuesByKey(ctx context.Context, checkID string) (map[string]store.Issue, error) {
@@ -360,9 +468,9 @@ func planChanges(checkID string, issues []Issue, openByKey map[string]store.Issu
 	p := plan{changes: store.IssueChanges{ResolvedAt: now}}
 	seen := make(map[string]bool, len(issues))
 	for _, issue := range issues {
-		seen[issue.Key] = true
 		stored := toStored(checkID, issue, now)
-		if open, ok := openByKey[issue.Key]; ok {
+		seen[stored.IssueKey] = true
+		if open, ok := openByKey[stored.IssueKey]; ok {
 			p.update(open, stored)
 			continue
 		}
@@ -379,12 +487,12 @@ func planChanges(checkID string, issues []Issue, openByKey map[string]store.Issu
 func toStored(checkID string, issue Issue, now int64) store.Issue {
 	return store.Issue{
 		CheckID:     checkID,
-		IssueKey:    issue.Key,
+		IssueKey:    boundKey(issue.Key),
 		Severity:    string(normalizeSeverity(issue.Severity)),
-		Title:       issue.Title,
-		Detail:      issue.Detail,
-		Link:        issue.Link,
-		Attributes:  attrs.Clone(issue.Attributes),
+		Title:       boundText(issue.Title, MaxTitleRunes),
+		Detail:      boundText(issue.Detail, MaxDetailRunes),
+		Link:        boundLink(issue.Link),
+		Attributes:  boundAttributes(issue.Attributes),
 		FirstSeen:   now,
 		LastSeen:    now,
 		Occurrences: max(issue.Count, 1),
@@ -395,9 +503,6 @@ func toStored(checkID string, issue Issue, now int64) store.Issue {
 // blocking the run.
 func (s *Service) notify(checkID, title string, n notification) {
 	issue := n.issue
-	if s.notifier == nil || issue.Severity == string(SeverityInfo) {
-		return
-	}
 	data := map[string]any{
 		"check":             title,
 		"check_id":          checkID,

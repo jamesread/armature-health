@@ -3,8 +3,10 @@ package errorlog
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -63,5 +65,14 @@ func TestErrorLogEvictsTheOldest(t *testing.T) {
 	l.record("newest")
 	if _, ok := l.entries["aaa"]; ok || len(l.entries) != maxLoggedErrors {
 		t.Fatalf("expected the oldest entry to be evicted, have %d entries", len(l.entries))
+	}
+}
+
+func TestErrorLogBoundsLongMessages(t *testing.T) {
+	l := New()
+	l.record(strings.Repeat("x", 1_000_000))
+	issues, _ := RecentErrorsCheck{Log: l}.Run(context.Background())
+	if len(issues) != 1 || utf8.RuneCountInString(issues[0].Detail) > maxMessage+200 {
+		t.Fatalf("expected one bounded issue, got %d issues", len(issues))
 	}
 }
