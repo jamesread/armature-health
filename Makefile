@@ -1,4 +1,4 @@
-.PHONY: build test test-mysql gocyclo golangci lint clean
+.PHONY: build test test-race test-mysql gocyclo golangci lint clean
 
 build:
 	@echo "Building armature-health..."
@@ -7,6 +7,10 @@ build:
 test:
 	@echo "Running unit tests..."
 	@go test -v ./...
+
+test-race:
+	@echo "Running unit tests with the race detector..."
+	@go test -race -count=1 ./...
 
 lint: gocyclo golangci
 

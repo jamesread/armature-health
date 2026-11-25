@@ -1,0 +1,23 @@
+name: Check target
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+
+permissions: {}
+
+jobs:
+  check-target:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check target branch
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          THIS_REPO: ${{ github.repository }}
+        run: |
+          if [ "$BASE_REF" != "main" ]; then exit 0; fi
+          if [ "$HEAD_REPO" = "$THIS_REPO" ] && [ "$HEAD_REF" = "next" ]; then exit 0; fi
+          echo "::error title=Wrong target branch::Only release PRs from 'next' may target 'main'. Please retarget this PR to 'next'."
+          exit 1

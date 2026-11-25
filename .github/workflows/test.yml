@@ -10,7 +10,7 @@ on:
     branches: [ main, next ]
 
 jobs:
-  test:
+  build:
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -32,6 +32,8 @@ jobs:
         version: v2.12.2
     - name: Run tests
       run: make test
+    - name: Run tests with the race detector
+      run: make test-race
     - name: Check code complexity
       run: make gocyclo
     - name: Run linter
